@@ -3,15 +3,23 @@ import pandas as pd
 import altair as alt
 
 # Load data
-modules_df = pd.read_csv('modules_config.csv')
-tiers_df = pd.read_csv('module_tiers.csv')
+modules_df = pd.read_csv('modules_config_clean.csv')
+tiers_df = pd.read_csv('module_tiers_clean.csv')
 
-# Set up app
+# App settings
 st.set_page_config(page_title="Transport Pricing Simulator", layout="wide")
 st.title("Transport Pricing Simulator")
-st.markdown("Adjust usage per module to simulate your monthly costs. Toggle **Admin Mode** to configure pricing.")
+st.markdown("Adjust usage of each module to estimate your monthly cost. Use Admin Mode to configure pricing.")
 
-# Identify required columns
+# Admin toggle
+admin_mode = st.sidebar.checkbox("Enable Admin Mode")
+
+# Setup columns
+usage_inputs = {}
+flat_prices = {}
+tier_configs = {}
+
+# Define columns
 module_col = 'Module'
 type_col = 'Type'
 price_col = 'UnitPrice'
@@ -19,14 +27,7 @@ tier_module_col = 'Module'
 tier_threshold_col = 'Threshold'
 tier_price_col = 'Price'
 
-# Admin mode toggle
-admin_mode = st.sidebar.checkbox("Enable Admin Mode")
-
-# Inputs
-usage_inputs = {}
-flat_prices = {}
-tier_configs = {}
-
+# Collect inputs
 for _, mod in modules_df.iterrows():
     module_name = str(mod[module_col])
     pricing_type = str(mod[type_col]).lower()
@@ -36,22 +37,21 @@ for _, mod in modules_df.iterrows():
 
     if admin_mode:
         if pricing_type == 'flat':
-            default_price = float(mod[price_col]) if price_col in mod else 0.0
-            flat_prices[module_name] = st.number_input(
-                f"{module_name} unit price", value=default_price, min_value=0.0, step=0.01)
+            default_price = float(mod[price_col]) if pd.notna(mod[price_col]) else 0.0
+            flat_prices[module_name] = st.number_input(f"{module_name} unit price", value=default_price, step=1.0)
         elif pricing_type == 'tiered':
-            st.markdown(f"**{module_name} – Pricing Tiers:**")
+            st.markdown(f"**{module_name} – Tiered Pricing:**")
             tiers = tiers_df[tiers_df[tier_module_col] == module_name].copy()
-            editable = st.data_editor(tiers.drop(columns=[tier_module_col]), num_rows="fixed", key=f"tiers_{module_name}")
+            editable = st.data_editor(tiers.drop(columns=[tier_module_col]), key=f"tiers_{module_name}", num_rows="fixed")
             editable[tier_module_col] = module_name
             tier_configs[module_name] = editable
     else:
         if pricing_type == 'flat':
-            flat_prices[module_name] = float(mod[price_col]) if price_col in mod else 0.0
+            flat_prices[module_name] = float(mod[price_col]) if pd.notna(mod[price_col]) else 0.0
         elif pricing_type == 'tiered':
             tier_configs[module_name] = tiers_df[tiers_df[tier_module_col] == module_name].copy()
 
-# Calculate costs
+# Pricing calculation
 results = []
 for module_name, usage in usage_inputs.items():
     pricing_type = str(modules_df[modules_df[module_col] == module_name][type_col].values[0]).lower()

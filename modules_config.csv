@@ -1,0 +1,11 @@
+name,category,unit,price,default_usage
+Booking Manager,Booking,Bookings,500.0,50
+Online Booking,Booking,Online Bookings,400.0,100
+Parcel Manager,Cargo,Parcels,200.0,30
+WhatsApp Notify,Customer,Notifications,5.0,200
+HR Manager,HR,Employees,20.0,500
+Fleet Manager,Fleet,Buses,1000.0,50
+Customer Support,Customer,Passengers,10.0,1000
+Maintenance,Fleet,Buses,500.0,50
+Procurement,Finance,Requisitions,300.0,20
+Performance Tools,Optimization,Flat Fee,5000.0,1

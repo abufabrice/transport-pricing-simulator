@@ -1,22 +1,35 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 
-# Load module data
+# Load data
 df = pd.read_csv("modules_config.csv")
 
 st.set_page_config(page_title="Transport Pricing Simulator", layout="wide")
-
 st.title("🚌 Transport Pricing Simulator")
+
 st.markdown("Use the sliders below to simulate module usage and view projected monthly costs. Pricing is tiered based on usage volume.")
 
-# Sidebar for scenario switching
+# Scenario factor
 scenario = st.sidebar.radio("Select Scenario", ["Low (80%)", "Medium (100%)", "High (120%)"])
 scenario_factor = {"Low (80%)": 0.8, "Medium (100%)": 1.0, "High (120%)": 1.2}[scenario]
 
-# User input for module usage
+# Admin mode
+edit_prices = st.sidebar.checkbox("🛠️ Admin: Edit Unit Prices")
+
+# Pricing editor
+if edit_prices:
+    st.sidebar.markdown("### Adjust Unit Prices")
+    new_prices = []
+    for i, row in df.iterrows():
+        new_price = st.sidebar.number_input(f"{row['name']}", min_value=0.0, value=float(row['price']), step=10.0)
+        new_prices.append(new_price)
+    df["price"] = new_prices
+else:
+    df["price"] = df["price"]
+
+# Sliders for usage
 usage = []
 st.sidebar.header("Adjust Usage")
 
@@ -27,7 +40,7 @@ for i, row in df.iterrows():
 
 df["usage"] = usage
 
-# Apply tiered pricing
+# Tiered pricing logic
 def tiered_price(unit_price, quantity):
     if quantity <= 100:
         return unit_price
@@ -39,7 +52,7 @@ def tiered_price(unit_price, quantity):
 df["unit_price"] = df.apply(lambda row: tiered_price(row["price"], row["usage"]), axis=1)
 df["amount"] = df["usage"] * df["unit_price"]
 
-# Display summary
+# Total
 total = df["amount"].sum()
 st.metric("💰 Total Monthly Cost", f"{total:,.0f} FCFA")
 
@@ -60,8 +73,7 @@ with col2:
     fig2.update_layout(xaxis_tickangle=-45)
     st.plotly_chart(fig2, use_container_width=True)
 
-# Data export
+# Export and data table
 st.subheader("📥 Export")
 st.download_button("Download Breakdown as CSV", df.to_csv(index=False), "pricing_breakdown.csv")
-
 st.dataframe(df[["name", "category", "unit", "usage", "unit_price", "amount"]], use_container_width=True)

@@ -1,192 +1,224 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import plotly.express as px
+import altair as alt
 
-# Set page config for better layout
-st.set_page_config(page_title="Transport Pricing Simulator", layout="wide")
+# Load configuration data from CSV files
+modules_df = pd.read_csv('modules_config.csv')
+tiers_df   = pd.read_csv('module_tiers.csv')
 
-# Load configuration files
-try:
-    modules_df = pd.read_csv("modules_config.csv")
-    tiers_df   = pd.read_csv("module_tiers.csv")
-except Exception as e:
-    st.error(f"Configuration files not found or unreadable: {e}")
+# Drop any internal cost or profit columns from the data (not used in calculations)
+for col in list(modules_df.columns):
+    if 'internal' in col.lower() or 'profit' in col.lower():
+        modules_df.drop(columns=[col], inplace=True)
+for col in list(tiers_df.columns):
+    if 'internal' in col.lower() or 'profit' in col.lower():
+        tiers_df.drop(columns=[col], inplace=True)
+
+# Identify important column names in the data
+# (Adjust these if your CSV headers use different names)
+module_col = None       # column name for module name
+type_col = None         # column name for pricing type (flat or tiered)
+price_col = None        # column name for flat price per unit
+for col in modules_df.columns:
+    clower = col.lower()
+    if 'module' in clower or 'name' in clower:
+        module_col = col
+    elif 'type' in clower:
+        type_col = col
+    elif 'price' in clower and ('unit' in clower or clower.strip() == 'price'):
+        price_col = col
+# Ensure required columns are found
+if module_col is None or type_col is None:
+    st.error("`modules_config.csv` must have columns for module name and pricing type.")
     st.stop()
+if price_col is None:
+    # If no explicit unit price column is found, assume it's named 'Price' or 'UnitPrice'
+    if 'UnitPrice' in modules_df.columns:
+        price_col = 'UnitPrice'
+    elif 'Price' in modules_df.columns:
+        price_col = 'Price'
+    else:
+        # If flat prices are not provided (e.g., all modules are tiered), we can continue
+        price_col = None
 
-# Clean and prepare the data
-# Remove any placeholder header rows (e.g. category labels) where measurement unit is NaN
-if 'Measurement Unit' in modules_df.columns:
-    modules_df = modules_df[modules_df['Measurement Unit'].notna()]
-
-# Convert numeric fields to proper types
-if 'Default' in modules_df.columns:
-    modules_df['Default'] = pd.to_numeric(modules_df['Default'], errors='coerce').fillna(0).astype(int)
-if 'InternalCost' in modules_df.columns:
-    modules_df['InternalCost'] = pd.to_numeric(modules_df['InternalCost'], errors='coerce').fillna(0.0)
-# Convert tier columns to numeric, NaNs for blanks
-for col in ['tier1_max', 'tier1_price', 'tier2_max', 'tier2_price', 'tier3_price']:
-    if col in tiers_df.columns:
-        tiers_df[col] = pd.to_numeric(tiers_df[col], errors='coerce')
-
-# Merge module info with tier pricing info on Module name
-merged_df = pd.merge(modules_df, tiers_df, on='Module', how='left')
-# Fill NaN in tier fields with 0 for easier calculations (0 indicates no tier or no price)
-for col in ['tier1_max', 'tier2_max', 'tier1_price', 'tier2_price', 'tier3_price']:
-    if col in merged_df.columns:
-        merged_df[col] = merged_df[col].fillna(0)
+# Identify tier CSV columns for module, threshold, and price
+tier_module_col = None
+tier_threshold_col = None
+tier_price_col = None
+for col in tiers_df.columns:
+    clower = col.lower()
+    if 'module' in clower or 'name' in clower:
+        tier_module_col = col
+    elif 'threshold' in clower or 'limit' in clower:
+        tier_threshold_col = col
+    elif 'price' in clower and 'internal' not in clower and 'profit' not in clower:
+        tier_price_col = col
+if tier_module_col is None or tier_threshold_col is None or tier_price_col is None:
+    st.error("`module_tiers.csv` must have columns for module name, threshold, and price.")
+    st.stop()
 
 # Title and description
 st.title("Transport Pricing Simulator")
-st.markdown("Adjust the usage sliders for each module to estimate monthly costs. "
-            "Turn on **Admin Mode** to edit pricing tiers and view revenue/cost/profit breakdowns.")
+st.write("Adjust the usage of each module to simulate monthly costs. Toggle **Admin mode** to modify pricing parameters (unit prices or tier structures).")
 
 # Admin mode toggle
-admin_mode = st.checkbox("Enable Admin Mode")
+admin_mode = st.checkbox("Admin mode")
 
-# Prepare containers for layout
-# We'll use two columns for sliders to make use of wide layout
-col1, col2 = st.columns(2)
+# Dictionaries to store inputs and (possibly adjusted) pricing
+usage_inputs = {}   # usage per module as set by the user
+flat_prices = {}    # per-unit prices for flat modules (updated in admin mode)
+tier_configs = {}   # tier DataFrames for tiered modules (updated in admin mode)
 
-# Lists to collect results for each module
-module_names = []
-usage_values = []
-amount_values = []
-cost_values = []
-profit_values = []
+# Display sliders for each module's usage and admin inputs if applicable
+for _, mod in modules_df.iterrows():
+    module_name = str(mod[module_col])
+    pricing_type = str(mod[type_col]).strip().lower()
+    # Usage slider for this module
+    usage = st.slider(f"{module_name} usage", min_value=0, max_value=1000, value=0, step=1)
+    usage_inputs[module_name] = usage
 
-# Iterate through each module in the merged data
-for idx, row in merged_df.iterrows():
-    module = str(row["Module"])
-    unit = str(row["Measurement Unit"]) if "Measurement Unit" in row else ""  # unit may not exist for all rows
-    default_usage = int(row["Default"]) if "Default" in row else 0
-
-    # Determine which column to place this module's controls in for two-col layout
-    target_col = col1 if idx % 2 == 0 else col2
-
-    # Compute slider range
-    slider_min = 0
-    # Start with 3x default or 50, whichever is larger (to provide a reasonable max)
-    slider_max = max(default_usage * 3, 50)
-    # If tier thresholds exist, extend the slider max to cover them and a bit beyond
-    if row.get("tier2_max", 0) and row["tier2_max"] > 0:
-        slider_max = max(slider_max, int(row["tier2_max"]))
-        if row.get("tier3_price", 0) and row["tier3_price"] > 0:
-            # If a third tier price exists, allow usage beyond tier2_max (e.g. up to 2x tier2_max)
-            slider_max = max(slider_max, int(row["tier2_max"] * 2))
-    # Ensure slider_max is at least as large as default_usage
-    slider_max = max(slider_max, default_usage)
-
-    # Create usage slider
-    slider_label = module if unit == "" else f"{module} ({unit})"
-    usage = target_col.slider(slider_label, min_value=slider_min, max_value=slider_max, value=default_usage)
-
-    # If Admin Mode, provide inputs to edit pricing tiers
     if admin_mode:
-        with target_col.expander(f"Edit pricing for {module}"):
-            if row.get("tier2_max", 0) and row["tier2_max"] > 0:
-                # Module has tiered pricing (tier2_max > 0 indicates a second tier exists)
-                tier1_max = st.number_input("Tier 1 max", min_value=0, value=int(row["tier1_max"]), key=f"{idx}_{module}_t1max")
-                tier1_price = st.number_input("Tier 1 price (FCFA)", min_value=0.0, value=float(row["tier1_price"]), key=f"{idx}_{module}_t1price")
-                tier2_max = st.number_input("Tier 2 max", min_value=0, value=int(row["tier2_max"]), key=f"{idx}_{module}_t2max")
-                tier2_price = st.number_input("Tier 2 price (FCFA)", min_value=0.0, value=float(row["tier2_price"]), key=f"{idx}_{module}_t2price")
-                tier3_price = st.number_input("Tier 3 price (FCFA)", min_value=0.0, value=float(row["tier3_price"]), key=f"{idx}_{module}_t3price")
+        # Show editable pricing parameters
+        if pricing_type == 'flat':
+            # Flat pricing: editable unit price
+            if price_col is not None and pd.notna(mod.get(price_col, None)):
+                default_price = float(mod[price_col])
             else:
-                # Module has no second tier -> single price
-                tier1_max = 0
-                tier2_max = 0
-                tier2_price = 0.0
-                tier3_price = 0.0
-                tier1_price = st.number_input("Price per unit (FCFA)", min_value=0.0, value=float(row["tier1_price"]), key=f"{idx}_{module}_price")
-    else:
-        # Not admin: use pricing from config as-is
-        tier1_max = int(row.get("tier1_max", 0))
-        tier1_price = float(row.get("tier1_price", 0.0))
-        tier2_max = int(row.get("tier2_max", 0))
-        tier2_price = float(row.get("tier2_price", 0.0))
-        tier3_price = float(row.get("tier3_price", 0.0))
-
-    # Calculate revenue (amount charged) for this module based on usage and tiered pricing
-    if tier2_max <= 0:
-        # No second tier defined, flat pricing
-        amount = usage * tier1_price
-    else:
-        # Tiered pricing calculation
-        if usage <= tier1_max:
-            amount = usage * tier1_price
-        elif usage <= tier2_max:
-            amount = tier1_max * tier1_price + (usage - tier1_max) * tier2_price
+                default_price = 0.0
+            new_price = st.number_input(f"{module_name} unit price", min_value=0.0, value=default_price, step=0.01, format="%.2f")
+            flat_prices[module_name] = new_price
+        elif pricing_type == 'tiered':
+            # Tiered pricing: show an editable table for tier thresholds and prices
+            st.markdown(f"**{module_name} – Pricing Tiers:**")
+            module_tiers = tiers_df[tiers_df[tier_module_col] == module_name].copy()
+            # Remove the module name column from the display (for cleaner editing)
+            if tier_module_col in module_tiers.columns:
+                module_tiers_display = module_tiers.drop(columns=[tier_module_col])
+            else:
+                module_tiers_display = module_tiers
+            # Editable data editor for tier thresholds and prices
+            edited_tiers = st.data_editor(module_tiers_display, num_rows="fixed", hide_index=True, key=f"tiers_{module_name}")
+            # Add the module name column back to the edited data for calculations
+            edited_tiers[tier_module_col] = module_name
+            tier_configs[module_name] = edited_tiers
         else:
-            amount = tier1_max * tier1_price
-            amount += (tier2_max - tier1_max) * tier2_price
-            amount += (usage - tier2_max) * tier3_price
-
-    # Calculate internal cost and profit if available
-    if "InternalCost" in modules_df.columns:
-        internal_cost = usage * float(row.get("InternalCost", 0.0))
-        profit = amount - internal_cost
+            # If an unexpected pricing type is encountered
+            st.warning(f"Module **{module_name}** has an unknown pricing type ('{mod[type_col]}').")
     else:
-        internal_cost = None
-        profit = None
+        # Not in admin mode: use original pricing values
+        if pricing_type == 'flat':
+            # Store the default flat price from the CSV (if available)
+            if price_col is not None and pd.notna(mod.get(price_col, None)):
+                flat_prices[module_name] = float(mod[price_col])
+            else:
+                flat_prices[module_name] = 0.0
+        elif pricing_type == 'tiered':
+            # Store the original tier DataFrame for this module
+            module_tiers = tiers_df[tiers_df[tier_module_col] == module_name].copy()
+            tier_configs[module_name] = module_tiers
 
-    # Store results
-    module_names.append(module)
-    usage_values.append(usage)
-    amount_values.append(round(amount))
-    cost_values.append(round(internal_cost) if internal_cost is not None else None)
-    profit_values.append(round(profit) if profit is not None else None)
+# Calculate the cost for each module based on usage and pricing
+results = []  # list to collect cost breakdown per module
+for module_name, usage in usage_inputs.items():
+    # Determine pricing type for this module
+    mod_row = modules_df[modules_df[module_col] == module_name].iloc[0]
+    pricing_type = str(mod_row[type_col]).strip().lower()
+    cost = 0.0
 
-# Create dataframe for results
-results_df = pd.DataFrame({
-    "Module": module_names,
-    "Usage": usage_values,
-    "Amount (FCFA)": amount_values
-})
-if "InternalCost" in modules_df.columns:
-    results_df["Internal Cost (FCFA)"] = cost_values
-    results_df["Profit (FCFA)"] = profit_values
+    if pricing_type == 'flat':
+        # Flat pricing calculation
+        price_per_unit = flat_prices.get(module_name, 0.0)
+        cost = usage * price_per_unit
 
-# Compute totals
-total_amount = results_df["Amount (FCFA)"].sum()
-total_cost = results_df["Internal Cost (FCFA)"].sum() if "Internal Cost (FCFA)" in results_df.columns else 0
-total_profit = results_df["Profit (FCFA)"].sum() if "Profit (FCFA)" in results_df.columns else 0
+    elif pricing_type == 'tiered':
+        # Tiered pricing calculation
+        # Use the tier configuration (edited if in admin mode, otherwise original)
+        module_tiers = tier_configs.get(module_name, pd.DataFrame())
+        if module_tiers.empty:
+            # No tier data found; cost remains 0 (or could handle as error)
+            cost = 0.0
+        else:
+            # Sort tiers by threshold value (numeric order); treat non-numeric or NaN as infinite tier
+            finite_tiers = []
+            infinite_price = None
+            prev_threshold = 0.0
 
-# Display results
-st.markdown("---")
-if admin_mode:
-    # Show detailed table and metrics for admin
-    st.subheader("Revenue and Profit Breakdown by Module")
-    st.table(results_df)  # display table with all columns
-    # Show total revenue, cost, profit
-    colA, colB, colC = st.columns(3)
-    colA.metric("Total Revenue (FCFA)", f"{total_amount:,.0f}")
-    colB.metric("Total Internal Cost (FCFA)", f"{total_cost:,.0f}")
-    colC.metric("Total Profit (FCFA)", f"{total_profit:,.0f}")
-else:
-    # Show only total cost metric for normal user
-    st.subheader("Total Estimated Cost")
-    st.metric("Estimated Monthly Cost (FCFA)", f"{total_amount:,.0f}")
+            for _, tier in module_tiers.iterrows():
+                # Get threshold and price from the row
+                threshold_val = tier[tier_threshold_col]
+                price_val = tier[tier_price_col]
+                # Determine if threshold is infinite (blank or non-numeric entry)
+                thresh = None
+                if pd.notna(threshold_val):
+                    try:
+                        thresh = float(threshold_val)
+                    except:
+                        thresh = None
+                # Determine price as float (NaN -> 0)
+                price = float(price_val) if pd.notna(price_val) else 0.0
 
-# If there's no usage at all (total_amount 0), avoid showing empty charts
-if total_amount <= 0:
-    st.warning("No usage entered. Adjust the sliders above to see the cost breakdown.")
-else:
-    # Prepare data for charts (use only Module and Amount columns for clarity)
-    chart_df = results_df[["Module", "Amount (FCFA)"]]
-    # Bar chart of cost by module
-    fig_bar = px.bar(chart_df, x="Module", y="Amount (FCFA)", title="Cost by Module (FCFA)")
-    # Pie chart of cost distribution
-    fig_pie = px.pie(chart_df, names="Module", values="Amount (FCFA)", title="Cost Distribution by Module")
-    st.plotly_chart(fig_bar, use_container_width=True)
-    st.plotly_chart(fig_pie, use_container_width=True)
+                if thresh is None:
+                    # Mark this tier as the "infinite" (no upper limit) tier
+                    infinite_price = price
+                else:
+                    finite_tiers.append((thresh, price))
 
-# Download CSV breakdown
-if admin_mode:
-    # Admin gets full breakdown including cost and profit
-    export_df = results_df.copy()
-else:
-    # Regular user gets only Module, Usage, Amount
-    export_df = results_df[["Module", "Usage", "Amount (FCFA)"]].copy()
-    export_df = export_df.rename(columns={"Amount (FCFA)": "Cost (FCFA)"})
-csv_data = export_df.to_csv(index=False)
-st.download_button("Download breakdown CSV", data=csv_data, file_name="pricing_breakdown.csv", mime="text/csv")
+            # Sort finite tiers by threshold
+            finite_tiers.sort(key=lambda x: x[0])
+            remaining = float(usage)
+            prev_threshold = 0.0
+
+            # Apply costs for each finite tier in order
+            for threshold, price in finite_tiers:
+                if remaining <= 0:
+                    break
+                # Units applicable in this tier = difference between this tier's threshold and the previous tier's threshold
+                tier_max_units = threshold - prev_threshold
+                units_in_tier = min(tier_max_units, remaining)
+                cost += units_in_tier * price
+                remaining -= units_in_tier
+                prev_threshold = threshold
+
+            # If there's remaining usage beyond the last finite tier, apply the infinite tier price or last tier price
+            if remaining > 0:
+                if infinite_price is not None:
+                    cost += remaining * infinite_price
+                elif finite_tiers:
+                    # If no infinite tier defined, use the last tier's price for the rest
+                    last_price = finite_tiers[-1][1]
+                    cost += remaining * last_price
+                # If no tiers at all (edge case), remaining usage cost stays 0
+
+    # Append this module's results
+    results.append({"Module": module_name, "Usage": usage, "Cost": cost})
+
+# Create a DataFrame with the results for display and charting
+results_df = pd.DataFrame(results)
+
+# Display the total monthly cost
+total_cost = results_df["Cost"].sum()
+st.subheader(f"**Total Monthly Cost: $ {total_cost:,.2f}**")
+
+# Display bar chart and pie chart for cost breakdown by module
+st.markdown("**Cost Breakdown by Module:**")
+# Bar chart (cost per module)
+st.bar_chart(results_df.set_index('Module')["Cost"])
+# Pie chart (cost distribution) using Altair for better presentation
+pie_chart = alt.Chart(results_df).mark_arc(innerRadius=50).encode(
+    theta=alt.Theta(field="Cost", type="quantitative"),
+    color=alt.Color(field="Module", type="nominal"),
+    tooltip=[
+        alt.Tooltip(field="Module", type="nominal"),
+        alt.Tooltip(field="Cost", type="quantitative", format="$,.2f")
+    ]
+)
+st.altair_chart(pie_chart, use_container_width=True)
+
+# Provide a download button for the cost breakdown CSV
+csv_data = results_df.to_csv(index=False)
+st.download_button(
+    label="Download cost breakdown CSV",
+    data=csv_data,
+    file_name="cost_breakdown.csv",
+    mime="text/csv"
+)
